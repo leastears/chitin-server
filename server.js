@@ -92,6 +92,18 @@ wss.on("connection", (ws) => {
     if (!client) return;
 
     switch (msg.type) {
+      case "chat":
+        const chatText = (msg.text || "").toString().slice(0, 120).trim();
+        if (!chatText) return;
+        broadcastAll({
+          type: "chat",
+          player_id: sessionId,
+          name: client.state.name,
+          text: chatText
+        });
+        console.log(`[Chat] ${client.state.name}: ${chatText}`);
+        break;
+
       case "input":
         // Обновляем стейт игрока
         const d = msg.data;
@@ -101,6 +113,7 @@ wss.on("connection", (ws) => {
           rot_head: d.rot_head ?? client.state.rot_head,
           jaw_open: d.jaw_open ?? client.state.jaw_open,
           is_moving: d.is_moving ?? client.state.is_moving,
+          name: d.name || client.state.name,
         });
         // Рассылаем дельту всем остальным
         broadcast({ type: "player_update", player_id: sessionId, data: client.state }, ws);
