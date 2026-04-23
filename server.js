@@ -69,6 +69,7 @@ wss.on("connection", (ws) => {
     jaw_open: 0,
     hp: MAX_HP,
     max_hp: MAX_HP,
+    xp: 0,
     is_alive: true,
     is_moving: false,
     name: "Worm_" + sessionId.slice(0, 4)
@@ -114,6 +115,8 @@ wss.on("connection", (ws) => {
           jaw_open: d.jaw_open ?? client.state.jaw_open,
           is_moving: d.is_moving ?? client.state.is_moving,
           name: d.name || client.state.name,
+          // XP: принимаем от клиента, но только если оно больше текущего (нельзя уменьшить обманом)
+          xp: (typeof d.xp === "number" && d.xp > client.state.xp) ? d.xp : client.state.xp,
         });
         // Рассылаем дельту всем остальным
         broadcast({ type: "player_update", player_id: sessionId, data: client.state }, ws);
