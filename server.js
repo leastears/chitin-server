@@ -23,10 +23,34 @@ class WormRoom extends require('colyseus').Room {
     
     this.deadSessions = new Map();
     this.SESSION_TTL = 5 * 60 * 1000; // 5 минут
+    this.lastActivity = new Map();
+    this.IDLE_TIMEOUT = 45 * 1000; // 45 секунд до статуса AFK
+    this.DISCONNECT_TIMEOUT = 5 * 60 * 1000; // 5 минут до реального дисконнекта
+
+    // Монитор активности игроков
+    this.setSimulationInterval(() => {
+      const now = Date.now();
+      
+      for (const [sessionId, player] of Object.entries(this.state.players)) {
+        const last = this.lastActivity.get(sessionId) || now;
+        
+        if (now - last > this.IDLE_TIMEOUT && !player.is_idle) {
+          player.is_idle = true;
+          this.broadcast("player_idle", { player_id: sessionId });
+        }
+        
+        if (now - last > this.DISCONNECT_TIMEOUT) {
+          // Реально отключаем после 5 минут полного отсутствия сигналов
+          this.disconnectPlayer(sessionId);
+        }
+      }
+    }, 5000);
 
     this.onMessage("input", (client, d) => {
       if (this.state.players[client.sessionId]) {
+        this.lastActivity.set(client.sessionId, Date.now());
         const p = this.state.players[client.sessionId];
+        p.is_idle = false;
         p.x = d.x ?? p.x;
         p.y = d.y ?? p.y;
         p.rot_head = d.rot_head ?? p.rot_head;
@@ -40,6 +64,10 @@ class WormRoom extends require('colyseus').Room {
           data: p
         }, { except: client });
       }
+    });
+
+    this.onMessage("ping", (client) => {
+      this.lastActivity.set(client.sessionId, Date.now());
     });
 
     this.onMessage("bite", (client, msg) => {
@@ -115,21 +143,31 @@ class WormRoom extends require('colyseus').Room {
   }
 
   onLeave(client, consented) {
-    console.log(client.sessionId, "left!");
-    
-    // Сохраняем сессию на 5 минут
+    // Не удаляем игрока сразу, ставим статус оффлайн
     const player = this.state.players[client.sessionId];
+    if (player) {
+      player.is_offline = true;
+      this.lastActivity.set(client.sessionId, Date.now());
+      this.broadcast("player_offline", { player_id: client.sessionId });
+      console.log(client.sessionId, "socket closed, keeping player in world for 5 min");
+    }
+  }
+  
+  disconnectPlayer(sessionId) {
+    const player = this.state.players[sessionId];
     if (player && player.is_alive) {
-      this.deadSessions.set(client.sessionId, {
+      this.deadSessions.set(sessionId, {
         time: Date.now(),
         data: player
       });
     }
     
-    delete this.state.players[client.sessionId];
-    this.broadcast("player_left", { player_id: client.sessionId });
+    delete this.state.players[sessionId];
+    this.lastActivity.delete(sessionId);
+    this.broadcast("player_left", { player_id: sessionId });
+    console.log(sessionId, "permanently removed from world");
     
-    // Чистим старые сессии каждые раз когда кто то выходит
+    // Чистим старые сессии
     const now = Date.now();
     for (const [id, entry] of this.deadSessions) {
       if (now - entry.time > this.SESSION_TTL) {
