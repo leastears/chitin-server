@@ -51,11 +51,15 @@ class WormRoom extends require('colyseus').Room {
       
     }, 50); // 20 раз в секунду
 
-    this.onMessage("input", (client, d) => {
+    this.onMessage("input", (client, msg) => {
       if (this.state.players[client.sessionId]) {
         this.lastActivity.set(client.sessionId, Date.now());
         const p = this.state.players[client.sessionId];
         p.is_idle = false;
+        
+        // Универсальное извлечение данных (из корня или из .data)
+        const d = msg.data || msg;
+        
         p.x = d.x ?? p.x;
         p.y = d.y ?? p.y;
         p.rot_head = d.rot_head ?? p.rot_head;
@@ -63,8 +67,6 @@ class WormRoom extends require('colyseus').Room {
         p.is_moving = d.is_moving ?? p.is_moving;
         p.name = d.name || p.name;
         p.xp = d.xp ?? p.xp;
-        
-        // Больше не шлем broadcast тут, это сделает world_sync в главном цикле
       }
     });
 
