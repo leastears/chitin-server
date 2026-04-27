@@ -1,4 +1,4 @@
-// Chitin Server - Stable Rollback (Deploy: 2026-04-27 23:06)
+// Chitin Server - Stable Rollback (Deploy: 2026-04-28)
 const http = require('http');
 const express = require('express');
 const { Server } = require('colyseus');
@@ -20,6 +20,9 @@ class WormRoom extends require('colyseus').Room {
       food: {},
       larvae: {}
     });
+    
+    this.deadSessions = new Map();
+    this.SESSION_TTL = 5 * 60 * 1000; // 5 минут
 
     this.onMessage("input", (client, d) => {
       if (this.state.players[client.sessionId]) {
@@ -74,32 +77,65 @@ class WormRoom extends require('colyseus').Room {
   }
 
   onJoin(client, options) {
-    console.log(client.sessionId, "joined!");
-    const p = {
-      x: Math.random() * 2000 - 1000,
-      y: Math.random() * 2000 - 1000,
-      rot_head: 0,
-      hp: 100,
-      is_alive: true,
-      name: options.name || "Worm",
-      jaw_open: 0,
-      is_moving: false,
-      xp: 0
-    };
-    this.state.players[client.sessionId] = p;
+    let playerData = null;
+    
+    // Пытаемся восстановить сессию
+    if (options.session_id && this.deadSessions.has(options.session_id)) {
+      const saved = this.deadSessions.get(options.session_id);
+      if (Date.now() - saved.time < this.SESSION_TTL) {
+        playerData = saved.data;
+        console.log("Restored session:", options.session_id);
+        this.deadSessions.delete(options.session_id);
+      }
+    }
+    
+    if (!playerData) {
+      // Новый игрок
+      playerData = {
+        x: Math.random() * 2000 - 1000,
+        y: Math.random() * 2000 - 1000,
+        rot_head: 0,
+        hp: 100,
+        is_alive: true,
+        name: options.name || "Worm",
+        jaw_open: 0,
+        is_moving: false,
+        xp: 0
+      };
+    }
+    
+    this.state.players[client.sessionId] = playerData;
 
     client.send("welcome", { session_id: client.sessionId });
     client.send("full_state", { players: this.state.players });
     this.broadcast("player_joined", { 
       player_id: client.sessionId, 
-      data: p 
+      data: playerData 
     }, { except: client });
   }
 
   onLeave(client, consented) {
     console.log(client.sessionId, "left!");
+    
+    // Сохраняем сессию на 5 минут
+    const player = this.state.players[client.sessionId];
+    if (player && player.is_alive) {
+      this.deadSessions.set(client.sessionId, {
+        time: Date.now(),
+        data: player
+      });
+    }
+    
     delete this.state.players[client.sessionId];
     this.broadcast("player_left", { player_id: client.sessionId });
+    
+    // Чистим старые сессии каждые раз когда кто то выходит
+    const now = Date.now();
+    for (const [id, entry] of this.deadSessions) {
+      if (now - entry.time > this.SESSION_TTL) {
+        this.deadSessions.delete(id);
+      }
+    }
   }
 }
 
