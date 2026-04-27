@@ -63,10 +63,11 @@ class WormRoom extends require('colyseus').Room {
 
     this.onMessage("chat", (client, msg) => {
       const p = this.state.players[client.sessionId];
-      if (p) {
+      const data = msg.data || msg; // На случай если прислали без data
+      if (p && data.text) {
         this.broadcast("chat", {
           name: p.name,
-          text: msg.text
+          text: data.text
         });
       }
     });
