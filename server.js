@@ -27,10 +27,11 @@ class WormRoom extends require('colyseus').Room {
     this.IDLE_TIMEOUT = 45 * 1000; // 45 секунд до статуса AFK
     this.DISCONNECT_TIMEOUT = 5 * 60 * 1000; // 5 минут до реального дисконнекта
 
-    // Монитор активности игроков
+    // Главный симуляционный цикл (Тикрейт 20 Гц)
     this.setSimulationInterval(() => {
       const now = Date.now();
       
+      // 1. Мониторинг активности и очистка
       for (const [sessionId, player] of Object.entries(this.state.players)) {
         const last = this.lastActivity.get(sessionId) || now;
         
@@ -40,11 +41,15 @@ class WormRoom extends require('colyseus').Room {
         }
         
         if (now - last > this.DISCONNECT_TIMEOUT) {
-          // Реально отключаем после 5 минут полного отсутствия сигналов
           this.disconnectPlayer(sessionId);
+          continue;
         }
       }
-    }, 5000);
+
+      // 2. Рассылка состояния мира ВСЕМ (даже если кто-то спит в фоне)
+      this.broadcast("world_sync", { players: this.state.players });
+      
+    }, 50); // 20 раз в секунду
 
     this.onMessage("input", (client, d) => {
       if (this.state.players[client.sessionId]) {
@@ -57,12 +62,9 @@ class WormRoom extends require('colyseus').Room {
         p.jaw_open = d.jaw_open ?? p.jaw_open;
         p.is_moving = d.is_moving ?? p.is_moving;
         p.name = d.name || p.name;
+        p.xp = d.xp ?? p.xp;
         
-        // Трансляция остальным
-        this.broadcast("player_update", {
-          player_id: client.sessionId,
-          data: p
-        }, { except: client });
+        // Больше не шлем broadcast тут, это сделает world_sync в главном цикле
       }
     });
 
@@ -71,34 +73,43 @@ class WormRoom extends require('colyseus').Room {
     });
 
     this.onMessage("bite", (client, msg) => {
+      const attacker = this.state.players[client.sessionId];
       const targetId = msg.target_id;
       const target = this.state.players[targetId];
-      if (target && target.is_alive) {
-        const damage = (msg.charge || 0.5) * 20;
-        target.hp -= damage;
-        this.broadcast("hit", { 
+      
+      if (!attacker || !target || !target.is_alive || !attacker.is_alive) return;
+      
+      // ✅ ВЕСЬ РАСЧЁТ УРОНА ТОЛЬКО НА СЕРВЕРЕ
+      const damage = Math.max(5, Math.min(40, (msg.charge || 0.5) * 40));
+      target.hp -= damage;
+      
+      this.broadcast("hit", { 
+        player_id: targetId, 
+        damage: damage,
+        attacker_id: client.sessionId
+      });
+      
+      if (target.hp <= 0) {
+        target.hp = 0;
+        target.is_alive = false;
+        
+        this.broadcast("player_died", { 
           player_id: targetId, 
-          damage: damage,
-          attacker_id: client.sessionId
+          killer_id: client.sessionId 
         });
         
-        if (target.hp <= 0) {
-          target.is_alive = false;
-          this.broadcast("player_died", { 
-            player_id: targetId, 
-            killer_id: client.sessionId 
-          });
-        }
+        this.deadSessions.delete(targetId);
+        this.lastActivity.delete(targetId);
       }
     });
 
     this.onMessage("chat", (client, msg) => {
       const p = this.state.players[client.sessionId];
-      const data = msg.data || msg; // На случай если прислали без data
-      if (p && data.text) {
+      if (p && msg.text) {
         this.broadcast("chat", {
+          player_id: client.sessionId,
           name: p.name,
-          text: data.text
+          text: msg.text
         });
       }
     });
@@ -155,6 +166,8 @@ class WormRoom extends require('colyseus').Room {
   
   disconnectPlayer(sessionId) {
     const player = this.state.players[sessionId];
+    
+    // Сохраняем сессию только если игрок жив
     if (player && player.is_alive) {
       this.deadSessions.set(sessionId, {
         time: Date.now(),
