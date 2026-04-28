@@ -85,6 +85,7 @@ wss.on("connection", (ws) => {
     is_alive: true,
     is_moving: false,
     name: `Worm_${sessionId.slice(0, 4)}`,
+    xp: 0,
   };
   playerStates.set(sessionId, playerState);
 
