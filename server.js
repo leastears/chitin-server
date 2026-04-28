@@ -18,6 +18,9 @@ const wss = new WebSocketServer({ server: httpServer });
 
 const clients = new Map();
 const playerStates = new Map();
+const foodStates = new Map();
+const FOOD_SPAWN_COUNT = 30;
+const FOOD_RESPAWN_DELAY = 2000; // 2 сек
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -25,6 +28,19 @@ function genId() {
 
 function randPos() {
   return (Math.random() - 0.5) * 1600;
+}
+
+function initFood() {
+  // Генерируем начальную еду
+  for (let i = 0; i < FOOD_SPAWN_COUNT; i++) {
+    const foodId = `food_${i}`;
+    foodStates.set(foodId, {
+      x: randPos(),
+      y: randPos(),
+      xp_value: Math.floor(Math.random() * 4) + 4, // 4-7 XP
+    });
+  }
+  console.log(`[Food] Generated ${FOOD_SPAWN_COUNT} food items`);
 }
 
 wss.on("connection", (ws) => {
@@ -49,12 +65,16 @@ wss.on("connection", (ws) => {
   // Welcome
   ws.send(JSON.stringify({ type: "welcome", session_id: sessionId }));
 
-  // Full state
+  // Full state with food
   const players = {};
   for (const [id, state] of playerStates) {
     players[id] = state;
   }
-  ws.send(JSON.stringify({ type: "full_state", players }));
+  const food = {};
+  for (const [id, fstate] of foodStates) {
+    food[id] = fstate;
+  }
+  ws.send(JSON.stringify({ type: "full_state", players, food }));
 
   ws.on("message", (data) => {
     try {
@@ -121,6 +141,43 @@ wss.on("connection", (ws) => {
           name: state.name,
           text: String(msg.text || "").slice(0, 100),
         });
+      } else if (msg.type === "eat") {
+        const foodId = msg.food_id;
+        const foodState = foodStates.get(foodId);
+        
+        if (foodState) {
+          // Валидируем расстояние
+          const dx = state.x - foodState.x;
+          const dy = state.y - foodState.y;
+          const distSq = dx * dx + dy * dy;
+          
+          if (distSq <= 100 * 100) { // 100px range
+            const xpGain = foodState.xp_value || 5;
+            state.xp = (state.xp || 0) + xpGain;
+            
+            foodStates.delete(foodId);
+            console.log(`${sessionId} ate ${foodId}, gained ${xpGain} XP (total: ${state.xp})`);
+            
+            // Broadcast food removal
+            broadcastAll({ type: "food_removed", food_id: foodId });
+            
+            // Respawn food later
+            setTimeout(() => {
+              foodStates.set(foodId, {
+                x: randPos(),
+                y: randPos(),
+                xp_value: Math.floor(Math.random() * 4) + 4,
+              });
+              broadcastAll({
+                type: "food_spawned",
+                food_id: foodId,
+                x: foodStates.get(foodId).x,
+                y: foodStates.get(foodId).y,
+                xp_value: foodStates.get(foodId).xp_value,
+              });
+            }, FOOD_RESPAWN_DELAY);
+          }
+        }
       }
     } catch (e) {
       console.error("[ERROR]", e);
@@ -152,10 +209,15 @@ setInterval(() => {
   for (const [id, state] of playerStates) {
     players[id] = state;
   }
+  const food = {};
+  for (const [id, fstate] of foodStates) {
+    food[id] = fstate;
+  }
 
   const payload = JSON.stringify({
     type: "world_sync",
     players,
+    food,
   });
 
   for (const [, client] of clients) {
@@ -166,6 +228,7 @@ setInterval(() => {
 }, 50);
 
 // v20260428-0336 Restart Trigger
+initFood(); // Initialize food before starting server
 httpServer.listen(PORT, () => {
   console.log(`\n🐛 Chitin ws://localhost:${PORT} (READY)\n`);
 });
