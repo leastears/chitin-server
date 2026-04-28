@@ -64,8 +64,10 @@ wss.on("connection", (ws) => {
 
       client.lastPing = Date.now();
 
-      if (msg.type === "join" || msg.type === "ping") {
-        // Просто обновляем lastPing - достаточно для keep-alive
+      if (msg.type === "ping") {
+        ws.send(JSON.stringify({ type: "pong", timestamp: msg.timestamp }));
+        return;
+      } else if (msg.type === "join") {
         return;
       } else if (msg.type === "input") {
         const input = msg.data || msg;
