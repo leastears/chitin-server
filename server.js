@@ -65,7 +65,8 @@ wss.on("connection", (ws) => {
       client.lastPing = Date.now();
 
       if (msg.type === "ping") {
-        ws.send(JSON.stringify({ type: "pong", timestamp: msg.timestamp }));
+        const ts = msg.timestamp || (msg.data ? msg.data.timestamp : null);
+        ws.send(JSON.stringify({ type: "pong", timestamp: ts }));
         return;
       } else if (msg.type === "join") {
         return;
