@@ -31,16 +31,44 @@ function randPos() {
 }
 
 function initFood() {
-  // Генерируем начальную еду
   for (let i = 0; i < FOOD_SPAWN_COUNT; i++) {
     const foodId = `food_${i}`;
     foodStates.set(foodId, {
       x: randPos(),
       y: randPos(),
-      xp_value: Math.floor(Math.random() * 4) + 4, // 4-7 XP
+      angle: Math.random() * Math.PI * 2,
+      speed: 0.5 + Math.random() * 0.5,
+      xp_value: Math.floor(Math.random() * 4) + 4,
     });
   }
   console.log(`[Food] Generated ${FOOD_SPAWN_COUNT} food items`);
+}
+
+function updateFoodAI() {
+  // Простой AI для еды - рандомное блуждание
+  for (const [foodId, food] of foodStates) {
+    // Иногда меняем направление
+    if (Math.random() < 0.02) {
+      food.angle = Math.random() * Math.PI * 2;
+      food.speed = 0.5 + Math.random() * 0.5;
+    }
+    
+    // Движемся
+    const moveDistance = food.speed * 0.5; // 0.5 сек за update
+    food.x += Math.cos(food.angle) * moveDistance;
+    food.y += Math.sin(food.angle) * moveDistance;
+    
+    // Остаемся в пределах карты
+    const limit = 800;
+    if (Math.abs(food.x) > limit) {
+      food.x = Math.max(-limit, Math.min(limit, food.x));
+      food.angle = Math.PI - food.angle;
+    }
+    if (Math.abs(food.y) > limit) {
+      food.y = Math.max(-limit, Math.min(limit, food.y));
+      food.angle = -food.angle;
+    }
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -205,6 +233,9 @@ function broadcastAll(msg) {
 
 // Broadcast state 20x per second
 setInterval(() => {
+  // Обновляем AI еды
+  updateFoodAI();
+  
   const players = {};
   for (const [id, state] of playerStates) {
     players[id] = state;
