@@ -26,16 +26,22 @@ function genId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function randPos() {
-  return (Math.random() - 0.5) * 1600;
+function randX() {
+  // Карта по X примерно от -5000 до +4000 в мировых координатах
+  return (Math.random() - 0.5) * 8000;
+}
+
+function randY() {
+  // Карта по Y примерно от -3500 до +4500 в мировых координатах
+  return (Math.random() - 0.5) * 7000 + 500;
 }
 
 function initFood() {
   for (let i = 0; i < FOOD_SPAWN_COUNT; i++) {
     const foodId = `food_${i}`;
     foodStates.set(foodId, {
-      x: randPos(),
-      y: randPos(),
+      x: randX(),
+      y: randY(),
       angle: Math.random() * Math.PI * 2,
       speed: 0.5 + Math.random() * 0.5,
       xp_value: Math.floor(Math.random() * 4) + 4,
@@ -45,27 +51,56 @@ function initFood() {
 }
 
 function updateFoodAI() {
-  // Простой AI для еды - рандомное блуждание
-  for (const [foodId, food] of foodStates) {
-    // Иногда меняем направление
-    if (Math.random() < 0.02) {
-      food.angle = Math.random() * Math.PI * 2;
-      food.speed = 0.5 + Math.random() * 0.5;
+  const FLEE_DIST = 300;
+  const FLEE_SPEED = 2.0;
+  const MAP_LIMIT_X = 4500;
+  const MAP_LIMIT_Y = 3500;
+
+  for (const [, food] of foodStates) {
+    // --- Логика убегания от игроков ---
+    let fleeX = 0;
+    let fleeY = 0;
+    let hasThreat = false;
+
+    for (const [, p] of playerStates) {
+      if (!p.is_alive) continue;
+      const dx = food.x - p.x;
+      const dy = food.y - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < FLEE_DIST && dist > 1) {
+        // Сила отталкивания: чем ближе, тем сильнее
+        const force = (FLEE_DIST - dist) / FLEE_DIST;
+        fleeX += (dx / dist) * force;
+        fleeY += (dy / dist) * force;
+        hasThreat = true;
+      }
     }
-    
-    // Движемся
-    const moveDistance = food.speed * 0.5; // 0.5 сек за update
+
+    if (hasThreat) {
+      // Убегаем — разворачиваемся в сторону суммарной силы отталкивания
+      food.angle = Math.atan2(fleeY, fleeX);
+      food.speed = FLEE_SPEED;
+    } else {
+      // Обычное блуждание — иногда меняем направление
+      if (Math.random() < 0.02) {
+        food.angle = Math.random() * Math.PI * 2;
+        food.speed = 0.5 + Math.random() * 0.5;
+      }
+    }
+
+    // Двигаемся
+    const moveDistance = food.speed * 0.5;
     food.x += Math.cos(food.angle) * moveDistance;
     food.y += Math.sin(food.angle) * moveDistance;
-    
+
     // Остаемся в пределах карты
-    const limit = 800;
-    if (Math.abs(food.x) > limit) {
-      food.x = Math.max(-limit, Math.min(limit, food.x));
+    if (Math.abs(food.x) > MAP_LIMIT_X) {
+      food.x = Math.max(-MAP_LIMIT_X, Math.min(MAP_LIMIT_X, food.x));
       food.angle = Math.PI - food.angle;
     }
-    if (Math.abs(food.y) > limit) {
-      food.y = Math.max(-limit, Math.min(limit, food.y));
+    if (Math.abs(food.y) > MAP_LIMIT_Y) {
+      food.y = Math.max(-MAP_LIMIT_Y, Math.min(MAP_LIMIT_Y, food.y));
       food.angle = -food.angle;
     }
   }
@@ -77,8 +112,8 @@ wss.on("connection", (ws) => {
   clients.set(sessionId, client);
 
   const playerState = {
-    x: randPos(),
-    y: randPos(),
+    x: randX(),
+    y: randY(),
     rot_head: 0,
     jaw_open: 0,
     hp: 100,
@@ -157,8 +192,8 @@ wss.on("connection", (ws) => {
                   const p = playerStates.get(targetId);
                   p.hp = 100;
                   p.is_alive = true;
-                  p.x = randPos();
-                  p.y = randPos();
+                  p.x = randX();
+                  p.y = randY();
                 }
               }, 5000);
             }
@@ -193,8 +228,10 @@ wss.on("connection", (ws) => {
             // Respawn food later
             setTimeout(() => {
               foodStates.set(foodId, {
-                x: randPos(),
-                y: randPos(),
+                x: randX(),
+                y: randY(),
+                angle: Math.random() * Math.PI * 2,
+                speed: 0.5 + Math.random() * 0.5,
                 xp_value: Math.floor(Math.random() * 4) + 4,
               });
               broadcastAll({
