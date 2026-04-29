@@ -21,6 +21,8 @@ const playerStates = new Map();
 const foodStates = new Map();
 const FOOD_SPAWN_COUNT = 30;
 const FOOD_RESPAWN_DELAY = 2000; // 2 сек
+const AOI_RADIUS = Number(process.env.AOI_RADIUS || 1400); // должен совпадать с minimap visibility_radius_world
+const AOI_RADIUS_SQ = AOI_RADIUS * AOI_RADIUS;
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -123,6 +125,12 @@ function pickFoodDynamic(f) {
     y: f.y,
     angle: f.angle,
   };
+}
+
+function distSq(ax, ay, bx, by) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  return dx * dx + dy * dy;
 }
 
 function broadcastExcept(exceptSessionId, msg) {
@@ -342,26 +350,34 @@ function broadcastAll(msg) {
 setInterval(() => {
   // Обновляем AI еды
   updateFoodAI();
-  
-  const players = {};
-  for (const [id, state] of playerStates) {
-    players[id] = pickPlayerDynamic(state);
-  }
-  const food = {};
-  for (const [id, fstate] of foodStates) {
-    food[id] = pickFoodDynamic(fstate);
-  }
 
-  const payload = JSON.stringify({
-    type: "world_sync",
-    players,
-    food,
-  });
+  // AOI: каждому клиенту только то, что рядом с ним
+  for (const [sid, client] of clients) {
+    if (client.ws.readyState !== 1) continue;
+    const center = playerStates.get(sid);
+    if (!center) continue;
 
-  for (const [, client] of clients) {
-    if (client.ws.readyState === 1) {
-      client.ws.send(payload);
+    const players = {};
+    for (const [id, state] of playerStates) {
+      if (id === sid || distSq(center.x, center.y, state.x, state.y) <= AOI_RADIUS_SQ) {
+        players[id] = pickPlayerDynamic(state);
+      }
     }
+
+    const food = {};
+    for (const [id, fstate] of foodStates) {
+      if (distSq(center.x, center.y, fstate.x, fstate.y) <= AOI_RADIUS_SQ) {
+        food[id] = pickFoodDynamic(fstate);
+      }
+    }
+
+    client.ws.send(
+      JSON.stringify({
+        type: "world_sync",
+        players,
+        food,
+      })
+    );
   }
 }, 50);
 
