@@ -106,6 +106,33 @@ function updateFoodAI() {
   }
 }
 
+function pickPlayerDynamic(s) {
+  return {
+    x: s.x,
+    y: s.y,
+    rot_head: s.rot_head,
+    jaw_open: s.jaw_open,
+    is_alive: s.is_alive,
+    is_moving: s.is_moving,
+  };
+}
+
+function pickFoodDynamic(f) {
+  return {
+    x: f.x,
+    y: f.y,
+    angle: f.angle,
+  };
+}
+
+function broadcastExcept(exceptSessionId, msg) {
+  const payload = JSON.stringify(msg);
+  for (const [sid, client] of clients) {
+    if (sid === exceptSessionId) continue;
+    if (client.ws.readyState === 1) client.ws.send(payload);
+  }
+}
+
 wss.on("connection", (ws) => {
   const sessionId = genId();
   const client = { ws, sessionId, lastPing: Date.now() };
@@ -140,6 +167,13 @@ wss.on("connection", (ws) => {
   }
   ws.send(JSON.stringify({ type: "full_state", players, food }));
 
+  // Notify others about the new player once (name/hp/xp included)
+  broadcastExcept(sessionId, {
+    type: "player_joined",
+    player_id: sessionId,
+    data: playerState,
+  });
+
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
@@ -156,7 +190,11 @@ wss.on("connection", (ws) => {
         return;
       } else if (msg.type === "input") {
         const input = msg.data || msg;
-        state.name = input.name || state.name;
+        // name changes are rare -> propagate only on change
+        if (typeof input.name === "string" && input.name && input.name !== state.name) {
+          state.name = input.name;
+          broadcastAll({ type: "player_update", player_id: sessionId, data: { name: state.name } });
+        }
         state.rot_head = input.target_angle ?? input.rot_head ?? state.rot_head;
         state.is_moving = input.is_moving ?? false;
         state.jaw_open = input.jaw_open ?? 0;
@@ -164,6 +202,8 @@ wss.on("connection", (ws) => {
           state.x = input.x;
           state.y = input.y;
         }
+        // XP на сервере авторитарный: клиент может предсказывать локально,
+        // но не должен перезатирать серверный XP своим input (иначе у других будет 0).
       } else if (msg.type === "bite") {
         const targetId = msg.target_id;
         const charge = Math.min(Math.max(msg.charge ?? 0.5, 0), 1);
@@ -179,8 +219,24 @@ wss.on("connection", (ws) => {
             targetState.hp = Math.max(0, targetState.hp - damage);
             console.log(`${sessionId} bit ${targetId} for ${damage.toFixed(1)} dmg`);
 
+            // Send hit to victim (for local feedback), and hp update to everyone
+            const victim = clients.get(targetId);
+            if (victim && victim.ws.readyState === 1) {
+              victim.ws.send(JSON.stringify({ type: "hit", damage, attacker_id: sessionId }));
+            }
+            broadcastAll({
+              type: "player_update",
+              player_id: targetId,
+              data: { hp: targetState.hp },
+            });
+
             if (targetState.hp <= 0) {
               targetState.is_alive = false;
+              broadcastAll({
+                type: "player_update",
+                player_id: targetId,
+                data: { is_alive: false, hp: 0 },
+              });
               broadcastAll({
                 type: "player_died",
                 player_id: targetId,
@@ -191,9 +247,15 @@ wss.on("connection", (ws) => {
                 if (playerStates.has(targetId)) {
                   const p = playerStates.get(targetId);
                   p.hp = 100;
+                  p.xp = 0;
                   p.is_alive = true;
                   p.x = randX();
                   p.y = randY();
+                  broadcastAll({
+                    type: "player_update",
+                    player_id: targetId,
+                    data: { hp: 100, xp: 0, is_alive: true },
+                  });
                 }
               }, 5000);
             }
@@ -219,6 +281,12 @@ wss.on("connection", (ws) => {
           if (distSq <= 100 * 100) { // 100px range
             const xpGain = foodState.xp_value || 5;
             state.xp = (state.xp || 0) + xpGain;
+
+            broadcastAll({
+              type: "player_update",
+              player_id: sessionId,
+              data: { xp: state.xp },
+            });
             
             foodStates.delete(foodId);
             console.log(`${sessionId} ate ${foodId}, gained ${xpGain} XP (total: ${state.xp})`);
@@ -277,11 +345,11 @@ setInterval(() => {
   
   const players = {};
   for (const [id, state] of playerStates) {
-    players[id] = state;
+    players[id] = pickPlayerDynamic(state);
   }
   const food = {};
   for (const [id, fstate] of foodStates) {
-    food[id] = fstate;
+    food[id] = pickFoodDynamic(fstate);
   }
 
   const payload = JSON.stringify({
