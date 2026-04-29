@@ -202,6 +202,7 @@ wss.on("connection", (ws) => {
       } else if (msg.type === "chat") {
         broadcastAll({
           type: "chat",
+          player_id: sessionId,
           name: state.name,
           text: String(msg.text || "").slice(0, 100),
         });
