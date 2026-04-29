@@ -21,6 +21,8 @@ const playerStates = new Map();
 const foodStates = new Map();
 const FOOD_SPAWN_COUNT = 30;
 const FOOD_RESPAWN_DELAY = 2000; // 2 сек
+const DEATH_FOOD_DESPAWN_MS = 30000; // should match client meat lifetime feel
+const CLIENT_TIMEOUT_MS = 15000; // drop "ghosts" if no messages for too long
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -133,23 +135,70 @@ function broadcastExcept(exceptSessionId, msg) {
   }
 }
 
+function clampInt(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v | 0));
+}
+
+function spawnDeathFood({ victimId, victimState, centerX, centerY }) {
+  const victimXp = Math.max(0, (victimState && victimState.xp) | 0);
+  // How many chunks: scales gently, always at least a few so it "feels" like a drop.
+  const n = clampInt(Math.ceil(victimXp / 10), 4, 18);
+
+  // Distribute XP exactly (no loss, no dupes).
+  const base = n > 0 ? Math.floor(victimXp / n) : 0;
+  const rem = n > 0 ? victimXp % n : 0;
+
+  const spawnedIds = [];
+
+  for (let i = 0; i < n; i++) {
+    const xpValue = base + (i < rem ? 1 : 0);
+    // Keep zero-xp chunks only as VFX if you want; here we skip them to avoid clutter.
+    if (victimXp === 0) break;
+
+    const foodId = `deathfood_${victimId}_${Date.now().toString(36)}_${i}`;
+
+    const a = Math.random() * Math.PI * 2;
+    const r = 40 + Math.random() * 140;
+    const x = centerX + Math.cos(a) * r;
+    const y = centerY + Math.sin(a) * r;
+
+    foodStates.set(foodId, {
+      x,
+      y,
+      angle: Math.random() * Math.PI * 2,
+      speed: 0, // death food doesn't roam
+      xp_value: xpValue,
+      _death_food: true,
+    });
+
+    broadcastAll({
+      type: "food_spawned",
+      food_id: foodId,
+      x,
+      y,
+      xp_value: xpValue,
+    });
+
+    spawnedIds.push(foodId);
+  }
+
+  // Despawn leftovers after some time (if not eaten).
+  if (spawnedIds.length > 0) {
+    setTimeout(() => {
+      for (const id of spawnedIds) {
+        if (foodStates.has(id)) {
+          foodStates.delete(id);
+          broadcastAll({ type: "food_removed", food_id: id });
+        }
+      }
+    }, DEATH_FOOD_DESPAWN_MS);
+  }
+}
+
 wss.on("connection", (ws) => {
   const sessionId = genId();
   const client = { ws, sessionId, lastPing: Date.now() };
   clients.set(sessionId, client);
-
-  const playerState = {
-    x: randX(),
-    y: randY(),
-    rot_head: 0,
-    jaw_open: 0,
-    hp: 100,
-    is_alive: true,
-    is_moving: false,
-    name: `Worm_${sessionId.slice(0, 4)}`,
-    xp: 0,
-  };
-  playerStates.set(sessionId, playerState);
 
   console.log(`[+] ${sessionId} connected (${clients.size} online)`);
 
@@ -167,19 +216,9 @@ wss.on("connection", (ws) => {
   }
   ws.send(JSON.stringify({ type: "full_state", players, food }));
 
-  // Notify others about the new player once (name/hp/xp included)
-  broadcastExcept(sessionId, {
-    type: "player_joined",
-    player_id: sessionId,
-    data: playerState,
-  });
-
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      const state = playerStates.get(sessionId);
-      if (!state) return;
-
       client.lastPing = Date.now();
 
       if (msg.type === "ping") {
@@ -187,8 +226,47 @@ wss.on("connection", (ws) => {
         ws.send(JSON.stringify({ type: "pong", timestamp: ts }));
         return;
       } else if (msg.type === "join") {
+        // Register the player only when they explicitly "join" the game.
+        if (playerStates.has(sessionId)) return;
+
+        const joinData = msg.data || msg || {};
+        const requestedName = typeof joinData.name === "string" ? joinData.name : "";
+        const name = requestedName && requestedName.trim() ? requestedName.trim() : `Worm_${sessionId.slice(0, 4)}`;
+
+        const playerState = {
+          x: randX(),
+          y: randY(),
+          rot_head: 0,
+          jaw_open: 0,
+          hp: 100,
+          is_alive: true,
+          is_moving: false,
+          name,
+          xp: 0,
+        };
+        playerStates.set(sessionId, playerState);
+
+        // Send a fresh full_state snapshot to the joining client (so they see current world).
+        const players = {};
+        for (const [id, state] of playerStates) {
+          players[id] = state;
+        }
+        const food = {};
+        for (const [id, fstate] of foodStates) {
+          food[id] = fstate;
+        }
+        ws.send(JSON.stringify({ type: "full_state", players, food }));
+
+        // Tell everyone (including this client via world_sync/pull; but keep symmetry)
+        broadcastExcept(sessionId, {
+          type: "player_joined",
+          player_id: sessionId,
+          data: playerState,
+        });
         return;
       } else if (msg.type === "input") {
+        const state = playerStates.get(sessionId);
+        if (!state) return;
         const input = msg.data || msg;
         // name changes are rare -> propagate only on change
         if (typeof input.name === "string" && input.name && input.name !== state.name) {
@@ -205,6 +283,8 @@ wss.on("connection", (ws) => {
         // XP на сервере авторитарный: клиент может предсказывать локально,
         // но не должен перезатирать серверный XP своим input (иначе у других будет 0).
       } else if (msg.type === "bite") {
+        const state = playerStates.get(sessionId);
+        if (!state) return;
         const targetId = msg.target_id;
         const charge = Math.min(Math.max(msg.charge ?? 0.5, 0), 1);
         const targetState = playerStates.get(targetId);
@@ -243,6 +323,14 @@ wss.on("connection", (ws) => {
                 killer_id: sessionId,
               });
 
+              // Spawn shared XP chunks around death point (authoritative food items).
+              spawnDeathFood({
+                victimId: targetId,
+                victimState: targetState,
+                centerX: targetState.x,
+                centerY: targetState.y,
+              });
+
               setTimeout(() => {
                 if (playerStates.has(targetId)) {
                   const p = playerStates.get(targetId);
@@ -254,7 +342,7 @@ wss.on("connection", (ws) => {
                   broadcastAll({
                     type: "player_update",
                     player_id: targetId,
-                    data: { hp: 100, xp: 0, is_alive: true },
+                    data: { hp: 100, xp: 0, is_alive: true, x: p.x, y: p.y },
                   });
                 }
               }, 5000);
@@ -262,6 +350,8 @@ wss.on("connection", (ws) => {
           }
         }
       } else if (msg.type === "chat") {
+        const state = playerStates.get(sessionId);
+        if (!state) return;
         broadcastAll({
           type: "chat",
           player_id: sessionId,
@@ -269,6 +359,8 @@ wss.on("connection", (ws) => {
           text: String(msg.text || "").slice(0, 100),
         });
       } else if (msg.type === "eat") {
+        const state = playerStates.get(sessionId);
+        if (!state) return;
         const foodId = msg.food_id;
         const foodState = foodStates.get(foodId);
         
@@ -294,23 +386,25 @@ wss.on("connection", (ws) => {
             // Broadcast food removal
             broadcastAll({ type: "food_removed", food_id: foodId });
             
-            // Respawn food later
-            setTimeout(() => {
-              foodStates.set(foodId, {
-                x: randX(),
-                y: randY(),
-                angle: Math.random() * Math.PI * 2,
-                speed: 0.5 + Math.random() * 0.5,
-                xp_value: Math.floor(Math.random() * 4) + 4,
-              });
-              broadcastAll({
-                type: "food_spawned",
-                food_id: foodId,
-                x: foodStates.get(foodId).x,
-                y: foodStates.get(foodId).y,
-                xp_value: foodStates.get(foodId).xp_value,
-              });
-            }, FOOD_RESPAWN_DELAY);
+            // Respawn only "regular" food. Death food should not respawn.
+            if (!foodState._death_food) {
+              setTimeout(() => {
+                foodStates.set(foodId, {
+                  x: randX(),
+                  y: randY(),
+                  angle: Math.random() * Math.PI * 2,
+                  speed: 0.5 + Math.random() * 0.5,
+                  xp_value: Math.floor(Math.random() * 4) + 4,
+                });
+                broadcastAll({
+                  type: "food_spawned",
+                  food_id: foodId,
+                  x: foodStates.get(foodId).x,
+                  y: foodStates.get(foodId).y,
+                  xp_value: foodStates.get(foodId).xp_value,
+                });
+              }, FOOD_RESPAWN_DELAY);
+            }
           }
         }
       }
@@ -340,6 +434,25 @@ function broadcastAll(msg) {
 
 // Broadcast state 20x per second
 setInterval(() => {
+  // Cleanup stale/disconnected clients (prevents "ghost" players on abrupt tab close)
+  const now = Date.now();
+  for (const [sid, client] of clients) {
+    const ws = client.ws;
+    const stale = now - (client.lastPing || 0) > CLIENT_TIMEOUT_MS;
+    const closed = !ws || ws.readyState === 3; // CLOSED
+    if (stale || closed) {
+      try {
+        if (ws && ws.readyState === 1) ws.terminate();
+      } catch (_) {}
+      clients.delete(sid);
+      const hadPlayer = playerStates.delete(sid);
+      if (hadPlayer) {
+        console.log(`[-] ${sid} timeout (${clients.size} online)`);
+        broadcastAll({ type: "player_left", player_id: sid });
+      }
+    }
+  }
+
   // Обновляем AI еды
   updateFoodAI();
 
