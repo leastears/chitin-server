@@ -200,6 +200,8 @@ function pickPlayerDynamic(s) {
     jaw_open: s.jaw_open,
     is_alive: s.is_alive,
     is_moving: s.is_moving,
+    is_pupa: s.is_pupa,
+    class_id: s.class_id,
   };
 }
 
@@ -332,6 +334,8 @@ wss.on("connection", (ws) => {
           hp: 100,
           is_alive: true,
           is_moving: false,
+          is_pupa: false,
+          class_id: "larva",
           name,
           xp: 0,
         };
@@ -369,17 +373,23 @@ wss.on("connection", (ws) => {
           broadcastAll({ type: "player_update", player_id: sessionId, data: { name: state.name } });
         }
         state.rot_head = input.target_angle ?? input.rot_head ?? state.rot_head;
-        state.is_moving = input.is_moving ?? false;
-        state.jaw_open = input.jaw_open ?? 0;
-        if (typeof input.x === "number" && typeof input.y === "number") {
-          state.x = input.x;
-          state.y = input.y;
+        
+        if (state.is_pupa) {
+          state.is_moving = false;
+          state.jaw_open = 0;
+        } else {
+          state.is_moving = input.is_moving ?? false;
+          state.jaw_open = input.jaw_open ?? 0;
+          if (typeof input.x === "number" && typeof input.y === "number") {
+            state.x = input.x;
+            state.y = input.y;
+          }
         }
         // XP на сервере авторитарный: клиент может предсказывать локально,
         // но не должен перезатирать серверный XP своим input (иначе у других будет 0).
       } else if (msg.type === "bite") {
         const state = playerStates.get(sessionId);
-        if (!state) return;
+        if (!state || state.is_pupa) return; // Pupa cannot bite
         const targetId = msg.target_id;
         const charge = Math.min(Math.max(msg.charge ?? 0.5, 0), 1);
         const partName = typeof msg.part_name === "string" ? msg.part_name.slice(0, 64) : "";
@@ -433,12 +443,14 @@ wss.on("connection", (ws) => {
                   p.hp = 100;
                   p.xp = 0;
                   p.is_alive = true;
+                  p.is_pupa = false;
+                  p.class_id = "larva";
                   p.x = randX();
                   p.y = randY();
                   broadcastAll({
                     type: "player_update",
                     player_id: targetId,
-                    data: { hp: 100, xp: 0, is_alive: true, x: p.x, y: p.y },
+                    data: { hp: 100, xp: 0, is_alive: true, is_pupa: false, class_id: "larva", x: p.x, y: p.y },
                   });
                 }
               }, 5000);
@@ -522,6 +534,32 @@ wss.on("connection", (ws) => {
           meatStates.delete(meatId);
           broadcastAll({ type: "meat_removed", meat_id: meatId });
         }
+      } else if (msg.type === "enter_pupa") {
+        const state = playerStates.get(sessionId);
+        if (!state || state.is_pupa) return;
+        if (state.xp >= 30 && state.is_alive) {
+          state.is_pupa = true;
+          state.is_moving = false;
+          broadcastAll({
+            type: "player_update",
+            player_id: sessionId,
+            data: { is_pupa: true, is_moving: false },
+          });
+        }
+      } else if (msg.type === "evolve") {
+        const state = playerStates.get(sessionId);
+        if (!state || !state.is_pupa) return;
+        const newClass = typeof msg.new_class === "string" ? msg.new_class : "larva";
+        
+        state.is_pupa = false;
+        state.class_id = newClass;
+        state.xp = Math.max(0, state.xp - 30); // Keep remainder
+        
+        broadcastAll({
+          type: "player_update",
+          player_id: sessionId,
+          data: { is_pupa: false, class_id: state.class_id, xp: state.xp },
+        });
       }
     } catch (e) {
       console.error("[ERROR]", e);
