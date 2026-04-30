@@ -25,7 +25,7 @@ const FOOD_SPAWN_COUNT = 30;
 const FOOD_RESPAWN_DELAY = 2000; // 2 сек
 const LARVA_SPAWN_COUNT = 18;
 const LARVA_RESPAWN_DELAY = 2500; // 2.5 сек
-const CLIENT_TIMEOUT_MS = 15000; // drop "ghosts" if no messages for too long
+const CLIENT_TIMEOUT_MS = 300000; // 5 минут (чтобы не сбрасывался XP при неактивной вкладке)
 const MEAT_DESPAWN_MS = 30000;
 // Keep spawns roughly within same limits as food AI walls.
 // NOTE: реальная карта имеет форму полигона на клиенте (Background). Сервер пока не знает этот полигон,
@@ -47,20 +47,59 @@ function randY() {
   return (Math.random() * 2 - 1) * (MAP_LIMIT_Y * 0.95);
 }
 
+const fs = require("fs");
+
+let mapData = null;
+try {
+  const raw = fs.readFileSync("./map.json", "utf8");
+  mapData = JSON.parse(raw);
+  console.log(`[Map] Loaded map.json with ${mapData.bounds?.length || 0} bounds points and ${mapData.obstacles?.length || 0} obstacles.`);
+} catch (e) {
+  console.log("[Map] No map.json found, using default ellipse bounds.");
+}
+
+function pointInPolygon(point, vs) {
+  let x = point.x, y = point.y;
+  let inside = false;
+  for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+    let xi = vs[i].x, yi = vs[i].y;
+    let xj = vs[j].x, yj = vs[j].y;
+    let intersect = ((yi > y) != (yj > y))
+        && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 function randSpawnPos() {
-  // Доп. защита: избегаем углов прямоугольника, где чаще всего "вне карты".
-  // Пока сервер не знает полигон карты, используем эллиптическое распределение.
-  // (Клиент всё равно дополнительно санитизирует по Background-полигону.)
   const a = MAP_LIMIT_X * 0.92;
   const b = MAP_LIMIT_Y * 0.92;
   let x = 0;
   let y = 0;
-  // Rejection sampling: x^2/a^2 + y^2/b^2 <= 1
-  for (let i = 0; i < 32; i++) {
+  for (let i = 0; i < 50; i++) {
     x = randX();
     y = randY();
-    const u = (x * x) / (a * a) + (y * y) / (b * b);
-    if (u <= 1) break;
+    
+    // Bounds check
+    if (mapData && mapData.bounds && mapData.bounds.length > 2) {
+      if (!pointInPolygon({x, y}, mapData.bounds)) continue;
+    } else {
+      const u = (x * x) / (a * a) + (y * y) / (b * b);
+      if (u > 1) continue;
+    }
+
+    // Obstacle check
+    let inObstacle = false;
+    if (mapData && mapData.obstacles) {
+      for (const obs of mapData.obstacles) {
+        if (pointInPolygon({x, y}, obs)) {
+          inObstacle = true;
+          break;
+        }
+      }
+    }
+    
+    if (!inObstacle) return { x, y };
   }
   return { x, y };
 }
@@ -133,17 +172,37 @@ function updateFoodAI() {
 
     // Двигаемся
     const moveDistance = food.speed * 0.5;
-    food.x += Math.cos(food.angle) * moveDistance;
-    food.y += Math.sin(food.angle) * moveDistance;
+    const nextX = food.x + Math.cos(food.angle) * moveDistance;
+    const nextY = food.y + Math.sin(food.angle) * moveDistance;
 
-    // Остаемся в пределах карты
-    if (Math.abs(food.x) > MAP_LIMIT_X) {
-      food.x = Math.max(-MAP_LIMIT_X, Math.min(MAP_LIMIT_X, food.x));
-      food.angle = Math.PI - food.angle;
+    let hitWall = false;
+    
+    if (mapData && mapData.bounds && mapData.bounds.length > 2) {
+      if (!pointInPolygon({x: nextX, y: nextY}, mapData.bounds)) hitWall = true;
+    } else {
+      if (Math.abs(nextX) > MAP_LIMIT_X || Math.abs(nextY) > MAP_LIMIT_Y) hitWall = true;
     }
-    if (Math.abs(food.y) > MAP_LIMIT_Y) {
-      food.y = Math.max(-MAP_LIMIT_Y, Math.min(MAP_LIMIT_Y, food.y));
-      food.angle = -food.angle;
+    
+    if (!hitWall && mapData && mapData.obstacles) {
+      for (const obs of mapData.obstacles) {
+        if (pointInPolygon({x: nextX, y: nextY}, obs)) {
+          hitWall = true;
+          break;
+        }
+      }
+    }
+
+    if (hitWall) {
+      // Отскок от стены
+      food.angle += Math.PI + (Math.random() - 0.5);
+      // Ограничиваем координаты на случай, если еда уже вылезла ( fallback )
+      if (!mapData || !mapData.bounds) {
+        food.x = Math.max(-MAP_LIMIT_X, Math.min(MAP_LIMIT_X, food.x));
+        food.y = Math.max(-MAP_LIMIT_Y, Math.min(MAP_LIMIT_Y, food.y));
+      }
+    } else {
+      food.x = nextX;
+      food.y = nextY;
     }
   }
 }
