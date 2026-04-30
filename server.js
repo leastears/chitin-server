@@ -19,11 +19,19 @@ const wss = new WebSocketServer({ server: httpServer });
 const clients = new Map();
 const playerStates = new Map();
 const foodStates = new Map();
+const larvaStates = new Map();
 const meatStates = new Map(); // authoritative "body chunks" after player death
 const FOOD_SPAWN_COUNT = 30;
 const FOOD_RESPAWN_DELAY = 2000; // 2 сек
+const LARVA_SPAWN_COUNT = 18;
+const LARVA_RESPAWN_DELAY = 2500; // 2.5 сек
 const CLIENT_TIMEOUT_MS = 15000; // drop "ghosts" if no messages for too long
 const MEAT_DESPAWN_MS = 30000;
+// Keep spawns roughly within same limits as food AI walls.
+// NOTE: реальная карта имеет форму полигона на клиенте (Background). Сервер пока не знает этот полигон,
+// поэтому делаем более консервативные лимиты, чтобы убрать грубые спавны "за картой".
+const MAP_LIMIT_X = 3600;
+const MAP_LIMIT_Y = 2800;
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -31,20 +39,53 @@ function genId() {
 
 function randX() {
   // Карта по X примерно от -5000 до +4000 в мировых координатах
-  return (Math.random() - 0.5) * 8000;
+  return (Math.random() * 2 - 1) * (MAP_LIMIT_X * 0.95);
 }
 
 function randY() {
   // Карта по Y примерно от -3500 до +4500 в мировых координатах
-  return (Math.random() - 0.5) * 7000 + 500;
+  return (Math.random() * 2 - 1) * (MAP_LIMIT_Y * 0.95);
+}
+
+function randSpawnPos() {
+  // Доп. защита: избегаем углов прямоугольника, где чаще всего "вне карты".
+  // Пока сервер не знает полигон карты, используем эллиптическое распределение.
+  // (Клиент всё равно дополнительно санитизирует по Background-полигону.)
+  const a = MAP_LIMIT_X * 0.92;
+  const b = MAP_LIMIT_Y * 0.92;
+  let x = 0;
+  let y = 0;
+  // Rejection sampling: x^2/a^2 + y^2/b^2 <= 1
+  for (let i = 0; i < 32; i++) {
+    x = randX();
+    y = randY();
+    const u = (x * x) / (a * a) + (y * y) / (b * b);
+    if (u <= 1) break;
+  }
+  return { x, y };
+}
+
+function initLarvae() {
+  for (let i = 0; i < LARVA_SPAWN_COUNT; i++) {
+    const larvaId = `larva_${i}`;
+    const p = randSpawnPos();
+    larvaStates.set(larvaId, {
+      x: p.x,
+      y: p.y,
+      angle: Math.random() * Math.PI * 2,
+      xp_value: Math.floor(Math.random() * 3) + 3,
+    });
+  }
+  console.log(`[Larvae] Generated ${LARVA_SPAWN_COUNT} larvae items`);
 }
 
 function initFood() {
   for (let i = 0; i < FOOD_SPAWN_COUNT; i++) {
     const foodId = `food_${i}`;
+    const p = randSpawnPos();
     foodStates.set(foodId, {
-      x: randX(),
-      y: randY(),
+      x: p.x,
+      y: p.y,
       angle: Math.random() * Math.PI * 2,
       speed: 0.5 + Math.random() * 0.5,
       xp_value: Math.floor(Math.random() * 4) + 4,
@@ -56,8 +97,6 @@ function initFood() {
 function updateFoodAI() {
   const FLEE_DIST = 300;
   const FLEE_SPEED = 2.0;
-  const MAP_LIMIT_X = 4500;
-  const MAP_LIMIT_Y = 3500;
 
   for (const [, food] of foodStates) {
     // --- Логика убегания от игроков ---
@@ -125,6 +164,14 @@ function pickFoodDynamic(f) {
     x: f.x,
     y: f.y,
     angle: f.angle,
+  };
+}
+
+function pickLarvaDynamic(l) {
+  return {
+    x: l.x,
+    y: l.y,
+    angle: l.angle,
   };
 }
 
@@ -215,11 +262,15 @@ wss.on("connection", (ws) => {
   for (const [id, fstate] of foodStates) {
     food[id] = fstate;
   }
+  const larvae = {};
+  for (const [id, lstate] of larvaStates) {
+    larvae[id] = lstate;
+  }
   const meat = {};
   for (const [id, mstate] of meatStates) {
     meat[id] = mstate;
   }
-  ws.send(JSON.stringify({ type: "full_state", players, food, meat }));
+  ws.send(JSON.stringify({ type: "full_state", players, food, larvae, meat }));
 
   ws.on("message", (data) => {
     try {
@@ -238,9 +289,10 @@ wss.on("connection", (ws) => {
         const requestedName = typeof joinData.name === "string" ? joinData.name : "";
         const name = requestedName && requestedName.trim() ? requestedName.trim() : `Worm_${sessionId.slice(0, 4)}`;
 
+        const spawn = randSpawnPos();
         const playerState = {
-          x: randX(),
-          y: randY(),
+          x: spawn.x,
+          y: spawn.y,
           rot_head: 0,
           jaw_open: 0,
           hp: 100,
@@ -260,11 +312,15 @@ wss.on("connection", (ws) => {
         for (const [id, fstate] of foodStates) {
           food[id] = fstate;
         }
+        const larvae = {};
+        for (const [id, lstate] of larvaStates) {
+          larvae[id] = lstate;
+        }
         const meat = {};
         for (const [id, mstate] of meatStates) {
           meat[id] = mstate;
         }
-        ws.send(JSON.stringify({ type: "full_state", players, food, meat }));
+        ws.send(JSON.stringify({ type: "full_state", players, food, larvae, meat }));
 
         // Tell everyone (including this client via world_sync/pull; but keep symmetry)
         broadcastExcept(sessionId, {
@@ -372,7 +428,8 @@ wss.on("connection", (ws) => {
         const state = playerStates.get(sessionId);
         if (!state) return;
         const foodId = msg.food_id;
-        const foodState = foodStates.get(foodId);
+        const isLarva = typeof foodId === "string" && foodId.startsWith("larva_");
+        const foodState = isLarva ? larvaStates.get(foodId) : foodStates.get(foodId);
         
         if (foodState) {
           // Валидируем расстояние
@@ -390,29 +447,57 @@ wss.on("connection", (ws) => {
               data: { xp: state.xp },
             });
             
-            foodStates.delete(foodId);
+            if (isLarva) {
+              larvaStates.delete(foodId);
+            } else {
+              foodStates.delete(foodId);
+            }
             console.log(`${sessionId} ate ${foodId}, gained ${xpGain} XP (total: ${state.xp})`);
             
-            // Broadcast food removal
-            broadcastAll({ type: "food_removed", food_id: foodId });
+            // Broadcast removal
+            if (isLarva) {
+              broadcastAll({ type: "larva_removed", larva_id: foodId });
+            } else {
+              broadcastAll({ type: "food_removed", food_id: foodId });
+            }
             
-            // Respawn regular NPC food only (food_*).
+            // Respawn (food_* / larva_*).
             setTimeout(() => {
-              foodStates.set(foodId, {
-                x: randX(),
-                y: randY(),
-                angle: Math.random() * Math.PI * 2,
-                speed: 0.5 + Math.random() * 0.5,
-                xp_value: Math.floor(Math.random() * 4) + 4,
-              });
-              broadcastAll({
-                type: "food_spawned",
-                food_id: foodId,
-                x: foodStates.get(foodId).x,
-                y: foodStates.get(foodId).y,
-                xp_value: foodStates.get(foodId).xp_value,
-              });
-            }, FOOD_RESPAWN_DELAY);
+              if (isLarva) {
+                const p = randSpawnPos();
+                larvaStates.set(foodId, {
+                  x: p.x,
+                  y: p.y,
+                  angle: Math.random() * Math.PI * 2,
+                  xp_value: Math.floor(Math.random() * 3) + 3,
+                });
+                const v = larvaStates.get(foodId);
+                broadcastAll({
+                  type: "larva_spawned",
+                  larva_id: foodId,
+                  x: v.x,
+                  y: v.y,
+                  xp_value: v.xp_value,
+                });
+              } else {
+                const p = randSpawnPos();
+                foodStates.set(foodId, {
+                  x: p.x,
+                  y: p.y,
+                  angle: Math.random() * Math.PI * 2,
+                  speed: 0.5 + Math.random() * 0.5,
+                  xp_value: Math.floor(Math.random() * 4) + 4,
+                });
+                const v = foodStates.get(foodId);
+                broadcastAll({
+                  type: "food_spawned",
+                  food_id: foodId,
+                  x: v.x,
+                  y: v.y,
+                  xp_value: v.xp_value,
+                });
+              }
+            }, isLarva ? LARVA_RESPAWN_DELAY : FOOD_RESPAWN_DELAY);
           }
         }
       } else if (msg.type === "eat_meat") {
@@ -492,11 +577,16 @@ setInterval(() => {
   for (const [id, fstate] of foodStates) {
     food[id] = pickFoodDynamic(fstate);
   }
+  const larvae = {};
+  for (const [id, lstate] of larvaStates) {
+    larvae[id] = pickLarvaDynamic(lstate);
+  }
 
   const payload = JSON.stringify({
     type: "world_sync",
     players,
     food,
+    larvae,
   });
 
   for (const [, client] of clients) {
@@ -508,6 +598,7 @@ setInterval(() => {
 
 // v20260428-0336 Restart Trigger
 initFood(); // Initialize food before starting server
+initLarvae(); // Initialize larvae before starting server
 httpServer.listen(PORT, () => {
   console.log(`\n🐛 Chitin ws://localhost:${PORT} (READY)\n`);
 });
