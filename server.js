@@ -156,16 +156,22 @@ function spawnMeatChunksOnDeath({ victimId, victimState, centerX, centerY }) {
     const xpValue = base + (i < rem ? 1 : 0);
     const meatId = `meat_${victimId}_${Date.now().toString(36)}_${i}`;
 
+    const landMs = 450 + Math.floor(Math.random() * 200);
     const a = Math.random() * Math.PI * 2;
     const r = 40 + Math.random() * 140;
     const x = centerX + Math.cos(a) * r;
     const y = centerY + Math.sin(a) * r;
-    const rot = Math.random() * Math.PI * 2;
+    const rotStart = Math.random() * Math.PI * 2;
+    const rotEnd = rotStart + (Math.random() * 2 - 1) * Math.PI * 1.2;
 
     const data = {
+      start_x: centerX,
+      start_y: centerY,
       x,
       y,
-      rot,
+      rot_start: rotStart,
+      rot_end: rotEnd,
+      land_ms: landMs,
       xp_value: xpValue,
       heal_amount: 5.0,
       victim_id: victimId,
