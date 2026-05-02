@@ -30,6 +30,16 @@ const MEAT_DESPAWN_MS = 30000;
 const MAP_LIMIT_X = 3600;
 const MAP_LIMIT_Y = 2800;
 
+/** Min XP to enter pupa (mirror Godot GameBalance.EVOLVE_XP_COST). Evolution does not spend XP. */
+const EVOLVE_XP_COST = 30;
+const EVOLVABLE_CLASSES = new Set([
+  "centipede",
+  "beetle",
+  "bug",
+  "limitrid",
+  "infectoid",
+]);
+
 function genId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -537,7 +547,7 @@ wss.on("connection", (ws) => {
       } else if (msg.type === "enter_pupa") {
         const state = playerStates.get(sessionId);
         if (!state || state.is_pupa) return;
-        if (state.xp >= 30 && state.is_alive) {
+        if (state.xp >= EVOLVE_XP_COST && state.is_alive) {
           state.is_pupa = true;
           state.is_moving = false;
           broadcastAll({
@@ -549,16 +559,17 @@ wss.on("connection", (ws) => {
       } else if (msg.type === "evolve") {
         const state = playerStates.get(sessionId);
         if (!state || !state.is_pupa) return;
-        const newClass = typeof msg.new_class === "string" ? msg.new_class : "larva";
-        
+        const newClass =
+          typeof msg.new_class === "string" ? msg.new_class.trim() : "larva";
+        if (!EVOLVABLE_CLASSES.has(newClass)) return;
+
         state.is_pupa = false;
         state.class_id = newClass;
-        state.xp = Math.max(0, state.xp - 30); // Keep remainder
-        
+
         broadcastAll({
           type: "player_update",
           player_id: sessionId,
-          data: { is_pupa: false, class_id: state.class_id, xp: state.xp },
+          data: { is_pupa: false, class_id: state.class_id },
         });
       }
     } catch (e) {
