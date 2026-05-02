@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "sync-web": "node scripts/sync-web.cjs"
   },
   "dependencies": {
     "ws": "^8.18.0",

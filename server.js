@@ -1,19 +1,61 @@
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
+const fs = require("fs");
 const { createServer } = require("http");
 const { WebSocketServer } = require("ws");
 
 const PORT = process.env.PORT || 2567;
 
+const SERVER_BUILD = "chitin-server-20260211";
+
+function resolveWebRoot() {
+  const env = process.env.WEB_ROOT && String(process.env.WEB_ROOT).trim();
+  const candidates = [
+    env,
+    path.join(__dirname, "public"),
+    path.join(__dirname, "..", "web_build"),
+  ].filter(Boolean);
+  for (const dir of candidates) {
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue;
+      if (fs.existsSync(path.join(dir, "index.html"))) return dir;
+    } catch (_) {}
+  }
+  return null;
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const SERVER_BUILD = "chitin-server-20260211";
+// Godot Web export with ensureCrossOriginIsolationHeaders needs a cross-origin isolated context.
+app.use((req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  next();
+});
 
-app.get("/", (req, res) => {
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.get("/api/status", (req, res) => {
   res.json({ status: "ok", game: "Chitin", build: SERVER_BUILD });
 });
+
+const WEB_ROOT = resolveWebRoot();
+if (WEB_ROOT) {
+  console.log(`[Static] Web export: ${WEB_ROOT}`);
+  app.use(express.static(WEB_ROOT, { index: ["index.html", "chitin.html"] }));
+} else {
+  console.log(
+    "[Static] No web export found (expected index.html in ./public, ../web_build, or WEB_ROOT).",
+  );
+  app.get("/", (req, res) => {
+    res.json({ status: "ok", game: "Chitin", build: SERVER_BUILD });
+  });
+}
 
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
@@ -61,8 +103,6 @@ function randY() {
   // Карта по Y примерно от -3500 до +4500 в мировых координатах
   return (Math.random() * 2 - 1) * (MAP_LIMIT_Y * 0.95);
 }
-
-const fs = require("fs");
 
 let mapData = null;
 try {
