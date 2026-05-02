@@ -330,7 +330,7 @@ function spawnCocoonOpenShell(ownerSessionId, x, y, xpValue, rotHead) {
       meatStates.delete(meatId);
       broadcastAll({ type: "meat_removed", meat_id: meatId });
     }
-  }, MEAT_DESPAWN_MS);
+  }, 15000);
 }
 
 wss.on("connection", (ws) => {
@@ -431,10 +431,10 @@ wss.on("connection", (ws) => {
         }
         
         if (state.is_pupa) {
-          // Пока игрок в куколке, угол головы фиксируем (куколка не должна "крутиться" от инпута).
           state.is_moving = false;
           state.jaw_open = 0;
         } else {
+          // Вне куколки обновляем поворот головы по инпуту.
           state.rot_head = input.target_angle ?? input.rot_head ?? state.rot_head;
           state.is_moving = input.is_moving ?? false;
           state.jaw_open = input.jaw_open ?? 0;
@@ -687,6 +687,7 @@ wss.on("connection", (ws) => {
               is_moving: false,
               hp: state.hp,
               max_hp: state.max_hp,
+              rot_head: state.rot_head,
             },
           });
         }
@@ -701,9 +702,7 @@ wss.on("connection", (ws) => {
         const shellY = state.y;
         const shellXp = Math.max(0, Math.floor((state.xp || 0) * 0.05));
         const shellRot =
-          typeof state.pre_pupa_rot_head === "number"
-            ? state.pre_pupa_rot_head
-            : (typeof state.rot_head === "number" ? state.rot_head : 0);
+          typeof state.pre_pupa_rot_head === "number" ? state.pre_pupa_rot_head : 0;
 
         const backHp =
           typeof state.pre_pupa_hp === "number" ? state.pre_pupa_hp : state.hp;
