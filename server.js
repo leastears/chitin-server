@@ -9,8 +9,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const SERVER_BUILD = "chitin-server-20260211";
+
 app.get("/", (req, res) => {
-  res.json({ status: "ok", game: "Chitin" });
+  res.json({ status: "ok", game: "Chitin", build: SERVER_BUILD });
 });
 
 const httpServer = createServer(app);
@@ -40,7 +42,11 @@ const EVOLVABLE_CLASSES = new Set([
   "infectoid",
 ]);
 /** HP оболочки куколки (mirror GameBalance.PUPA_SHELL_MAX_HP). */
-const PUPA_SHELL_MAX_HP = 100;
+const PUPA_SHELL_MAX_HP = 45;
+/** Nobody can eat cocoon_open meat until this many ms after spawn (misclicks / overlap). */
+const COCOON_EAT_GRACE_MS = 3500;
+/** Shell HP for open cocoon (bites reduce until 0, then XP is granted). */
+const COCOON_OPEN_SHELL_HP = 25;
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -295,19 +301,25 @@ function spawnMeatChunksOnDeath({ victimId, victimState, centerX, centerY }) {
   }
 }
 
-function spawnCocoonOpenShell(ownerSessionId, x, y, xpValue) {
-  const meatId = `meat_cocoon_${ownerSessionId}_${Date.now().toString(36)}`;
+function spawnCocoonOpenShell(ownerSessionId, x, y, xpValue, rotHead) {
+  const spawnMs = Date.now();
+  const meatId = `meat_cocoon_${ownerSessionId}_${spawnMs.toString(36)}`;
+  const rotStart = typeof rotHead === "number" ? rotHead : 0;
   const data = {
     kind: "cocoon_open",
+    owner_id: ownerSessionId,
+    spawn_ms: spawnMs,
     start_x: x,
     start_y: y,
     x,
     y,
-    rot_start: 0,
-    rot_end: 0,
+    rot_start: rotStart,
+    rot_end: rotStart,
     land_ms: 0,
     xp_value: xpValue | 0,
-    heal_amount: 5.0,
+    heal_amount: 25.0,
+    shell_hp: COCOON_OPEN_SHELL_HP,
+    shell_max_hp: COCOON_OPEN_SHELL_HP,
     victim_id: "",
     part_index: 0,
   };
@@ -329,7 +341,13 @@ wss.on("connection", (ws) => {
   console.log(`[+] ${sessionId} connected (${clients.size} online)`);
 
   // Welcome
-  ws.send(JSON.stringify({ type: "welcome", session_id: sessionId }));
+  ws.send(
+    JSON.stringify({
+      type: "welcome",
+      session_id: sessionId,
+      build: SERVER_BUILD,
+    }),
+  );
 
   // Full state with food
   const players = {};
@@ -411,12 +429,13 @@ wss.on("connection", (ws) => {
           state.name = input.name;
           broadcastAll({ type: "player_update", player_id: sessionId, data: { name: state.name } });
         }
-        state.rot_head = input.target_angle ?? input.rot_head ?? state.rot_head;
         
         if (state.is_pupa) {
+          // Пока игрок в куколке, угол головы фиксируем (куколка не должна "крутиться" от инпута).
           state.is_moving = false;
           state.jaw_open = 0;
         } else {
+          state.rot_head = input.target_angle ?? input.rot_head ?? state.rot_head;
           state.is_moving = input.is_moving ?? false;
           state.jaw_open = input.jaw_open ?? 0;
           if (typeof input.x === "number" && typeof input.y === "number") {
@@ -470,12 +489,16 @@ wss.on("connection", (ws) => {
                 targetState.class_id = backClass;
                 targetState.hp = backHp;
                 targetState.max_hp = 100;
+                if (typeof targetState.pre_pupa_rot_head === "number") {
+                  targetState.rot_head = targetState.pre_pupa_rot_head;
+                }
                 targetState.xp = Math.max(
                   0,
                   Math.floor((targetState.xp || 0) * 0.85),
                 );
                 delete targetState.pre_pupa_class_id;
                 delete targetState.pre_pupa_hp;
+                delete targetState.pre_pupa_rot_head;
                 broadcastAll({
                   type: "player_update",
                   player_id: targetId,
@@ -608,20 +631,50 @@ wss.on("connection", (ws) => {
         const dx = state.x - m.x;
         const dy = state.y - m.y;
         const distSq = dx * dx + dy * dy;
-        if (distSq <= 110 * 110) {
+        if (distSq > 110 * 110) return;
+
+        if (m.kind === "cocoon_open") {
+          if (typeof m.spawn_ms === "number" && Date.now() - m.spawn_ms < COCOON_EAT_GRACE_MS) {
+            return;
+          }
+          const dmgRaw = Number(msg.damage);
+          const dmg =
+            Number.isFinite(dmgRaw) && dmgRaw > 0 ? Math.min(50, dmgRaw) : 12;
+          if (typeof m.shell_hp !== "number") m.shell_hp = COCOON_OPEN_SHELL_HP;
+          if (typeof m.shell_max_hp !== "number") m.shell_max_hp = COCOON_OPEN_SHELL_HP;
+          m.shell_hp -= dmg;
+          if (m.shell_hp > 0) {
+            broadcastAll({
+              type: "meat_update",
+              meat_id: meatId,
+              data: { shell_hp: m.shell_hp },
+            });
+            return;
+          }
           const xpGain = (m.xp_value || 0) | 0;
           state.xp = (state.xp || 0) + xpGain;
           broadcastAll({ type: "player_update", player_id: sessionId, data: { xp: state.xp } });
-
           meatStates.delete(meatId);
           broadcastAll({ type: "meat_removed", meat_id: meatId });
+          return;
         }
+
+        const xpGain = (m.xp_value || 0) | 0;
+        state.xp = (state.xp || 0) + xpGain;
+        broadcastAll({ type: "player_update", player_id: sessionId, data: { xp: state.xp } });
+
+        meatStates.delete(meatId);
+        broadcastAll({ type: "meat_removed", meat_id: meatId });
       } else if (msg.type === "enter_pupa") {
         const state = playerStates.get(sessionId);
         if (!state || state.is_pupa) return;
         if (state.xp >= EVOLVE_XP_COST && state.is_alive) {
+          if (typeof msg.rot_head === "number" && Number.isFinite(msg.rot_head)) {
+            state.rot_head = msg.rot_head;
+          }
           state.pre_pupa_class_id = state.class_id || "larva";
           state.pre_pupa_hp = state.hp;
+          state.pre_pupa_rot_head = state.rot_head;
           state.hp = PUPA_SHELL_MAX_HP;
           state.max_hp = PUPA_SHELL_MAX_HP;
           state.is_pupa = true;
@@ -647,6 +700,10 @@ wss.on("connection", (ws) => {
         const shellX = state.x;
         const shellY = state.y;
         const shellXp = Math.max(0, Math.floor((state.xp || 0) * 0.05));
+        const shellRot =
+          typeof state.pre_pupa_rot_head === "number"
+            ? state.pre_pupa_rot_head
+            : (typeof state.rot_head === "number" ? state.rot_head : 0);
 
         const backHp =
           typeof state.pre_pupa_hp === "number" ? state.pre_pupa_hp : state.hp;
@@ -656,6 +713,7 @@ wss.on("connection", (ws) => {
         state.max_hp = 100;
         delete state.pre_pupa_class_id;
         delete state.pre_pupa_hp;
+        delete state.pre_pupa_rot_head;
 
         broadcastAll({
           type: "player_update",
@@ -668,7 +726,7 @@ wss.on("connection", (ws) => {
           },
         });
 
-        spawnCocoonOpenShell(sessionId, shellX, shellY, shellXp);
+        spawnCocoonOpenShell(sessionId, shellX, shellY, shellXp, shellRot);
       }
     } catch (e) {
       console.error("[ERROR]", e);
