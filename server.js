@@ -220,6 +220,11 @@ function pickPlayerDynamic(s) {
     is_moving: s.is_moving,
     is_pupa: s.is_pupa,
     class_id: s.class_id,
+    // Needed for remote UI (HpBar/leaderboard) to not show stale zeros.
+    name: s.name,
+    xp: s.xp,
+    hp: s.hp,
+    max_hp: s.max_hp,
   };
 }
 
