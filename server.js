@@ -39,6 +39,8 @@ const EVOLVABLE_CLASSES = new Set([
   "limitrid",
   "infectoid",
 ]);
+/** HP оболочки куколки (mirror GameBalance.PUPA_SHELL_MAX_HP). */
+const PUPA_SHELL_MAX_HP = 100;
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -293,6 +295,32 @@ function spawnMeatChunksOnDeath({ victimId, victimState, centerX, centerY }) {
   }
 }
 
+function spawnCocoonOpenShell(ownerSessionId, x, y, xpValue) {
+  const meatId = `meat_cocoon_${ownerSessionId}_${Date.now().toString(36)}`;
+  const data = {
+    kind: "cocoon_open",
+    start_x: x,
+    start_y: y,
+    x,
+    y,
+    rot_start: 0,
+    rot_end: 0,
+    land_ms: 0,
+    xp_value: xpValue | 0,
+    heal_amount: 5.0,
+    victim_id: "",
+    part_index: 0,
+  };
+  meatStates.set(meatId, data);
+  broadcastAll({ type: "meat_spawned", meat_id: meatId, data });
+  setTimeout(() => {
+    if (meatStates.has(meatId)) {
+      meatStates.delete(meatId);
+      broadcastAll({ type: "meat_removed", meat_id: meatId });
+    }
+  }, MEAT_DESPAWN_MS);
+}
+
 wss.on("connection", (ws) => {
   const sessionId = genId();
   const client = { ws, sessionId, lastPing: Date.now() };
@@ -342,6 +370,7 @@ wss.on("connection", (ws) => {
           rot_head: 0,
           jaw_open: 0,
           hp: 100,
+          max_hp: 100,
           is_alive: true,
           is_moving: false,
           is_pupa: false,
@@ -427,43 +456,86 @@ wss.on("connection", (ws) => {
             });
 
             if (targetState.hp <= 0) {
-              targetState.is_alive = false;
-              broadcastAll({
-                type: "player_update",
-                player_id: targetId,
-                data: { is_alive: false, hp: 0 },
-              });
-              broadcastAll({
-                type: "player_died",
-                player_id: targetId,
-                killer_id: sessionId,
-              });
+              if (targetState.is_pupa) {
+                // Куколку разрушили — отмена эволюции, −15% XP, без смерти и мяса.
+                const backClass =
+                  typeof targetState.pre_pupa_class_id === "string"
+                    ? targetState.pre_pupa_class_id
+                    : "larva";
+                const backHp =
+                  typeof targetState.pre_pupa_hp === "number"
+                    ? targetState.pre_pupa_hp
+                    : 100;
+                targetState.is_pupa = false;
+                targetState.class_id = backClass;
+                targetState.hp = backHp;
+                targetState.max_hp = 100;
+                targetState.xp = Math.max(
+                  0,
+                  Math.floor((targetState.xp || 0) * 0.85),
+                );
+                delete targetState.pre_pupa_class_id;
+                delete targetState.pre_pupa_hp;
+                broadcastAll({
+                  type: "player_update",
+                  player_id: targetId,
+                  data: {
+                    is_pupa: false,
+                    class_id: targetState.class_id,
+                    hp: targetState.hp,
+                    max_hp: targetState.max_hp,
+                    xp: targetState.xp,
+                    is_alive: true,
+                  },
+                });
+              } else {
+                targetState.is_alive = false;
+                broadcastAll({
+                  type: "player_update",
+                  player_id: targetId,
+                  data: { is_alive: false, hp: 0 },
+                });
+                broadcastAll({
+                  type: "player_died",
+                  player_id: targetId,
+                  killer_id: sessionId,
+                });
 
-              // Spawn shared body chunks (authoritative meat items).
-              spawnMeatChunksOnDeath({
-                victimId: targetId,
-                victimState: targetState,
-                centerX: targetState.x,
-                centerY: targetState.y,
-              });
+                spawnMeatChunksOnDeath({
+                  victimId: targetId,
+                  victimState: targetState,
+                  centerX: targetState.x,
+                  centerY: targetState.y,
+                });
 
-              setTimeout(() => {
-                if (playerStates.has(targetId)) {
-                  const p = playerStates.get(targetId);
-                  p.hp = 100;
-                  p.xp = 0;
-                  p.is_alive = true;
-                  p.is_pupa = false;
-                  p.class_id = "larva";
-                  p.x = randX();
-                  p.y = randY();
-                  broadcastAll({
-                    type: "player_update",
-                    player_id: targetId,
-                    data: { hp: 100, xp: 0, is_alive: true, is_pupa: false, class_id: "larva", x: p.x, y: p.y },
-                  });
-                }
-              }, 5000);
+                setTimeout(() => {
+                  if (playerStates.has(targetId)) {
+                    const p = playerStates.get(targetId);
+                    p.hp = 100;
+                    p.max_hp = 100;
+                    p.xp = 0;
+                    p.is_alive = true;
+                    p.is_pupa = false;
+                    p.class_id = "larva";
+                    p.x = randX();
+                    p.y = randY();
+                    broadcastAll({
+                      type: "player_update",
+                      player_id: targetId,
+                      data: {
+                        hp: 100,
+                        max_hp: 100,
+                        xp: 0,
+                        is_alive: true,
+                        is_pupa: false,
+                        class_id: "larva",
+                        x: p.x,
+                        y: p.y,
+                      },
+                    });
+                  }
+                }, 5000);
+              }
             }
           }
         }
@@ -548,12 +620,21 @@ wss.on("connection", (ws) => {
         const state = playerStates.get(sessionId);
         if (!state || state.is_pupa) return;
         if (state.xp >= EVOLVE_XP_COST && state.is_alive) {
+          state.pre_pupa_class_id = state.class_id || "larva";
+          state.pre_pupa_hp = state.hp;
+          state.hp = PUPA_SHELL_MAX_HP;
+          state.max_hp = PUPA_SHELL_MAX_HP;
           state.is_pupa = true;
           state.is_moving = false;
           broadcastAll({
             type: "player_update",
             player_id: sessionId,
-            data: { is_pupa: true, is_moving: false },
+            data: {
+              is_pupa: true,
+              is_moving: false,
+              hp: state.hp,
+              max_hp: state.max_hp,
+            },
           });
         }
       } else if (msg.type === "evolve") {
@@ -563,14 +644,31 @@ wss.on("connection", (ws) => {
           typeof msg.new_class === "string" ? msg.new_class.trim() : "larva";
         if (!EVOLVABLE_CLASSES.has(newClass)) return;
 
+        const shellX = state.x;
+        const shellY = state.y;
+        const shellXp = Math.max(0, Math.floor((state.xp || 0) * 0.05));
+
+        const backHp =
+          typeof state.pre_pupa_hp === "number" ? state.pre_pupa_hp : state.hp;
         state.is_pupa = false;
         state.class_id = newClass;
+        state.hp = backHp;
+        state.max_hp = 100;
+        delete state.pre_pupa_class_id;
+        delete state.pre_pupa_hp;
 
         broadcastAll({
           type: "player_update",
           player_id: sessionId,
-          data: { is_pupa: false, class_id: state.class_id },
+          data: {
+            is_pupa: false,
+            class_id: state.class_id,
+            hp: state.hp,
+            max_hp: state.max_hp,
+          },
         });
+
+        spawnCocoonOpenShell(sessionId, shellX, shellY, shellXp);
       }
     } catch (e) {
       console.error("[ERROR]", e);
